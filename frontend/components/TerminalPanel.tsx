@@ -91,12 +91,17 @@ export function TerminalPanel({
       setReady(true); // unblocks the transcript-paint effect below
     };
 
+    // Drive open/fit from the ResizeObserver only (never synchronously). The RO
+    // fires an initial callback with the current size, so this still opens
+    // promptly — but because it's async, StrictMode's mount→dispose→mount cycle
+    // has already settled by the time it runs, and ro.disconnect() in cleanup
+    // cancels the discarded instance's open before it can schedule (and later
+    // crash in) xterm's internal syncScrollArea.
     const ro = new ResizeObserver(() => {
       openWhenSized();
       safeFit();
     });
     ro.observe(host);
-    openWhenSized(); // in case the host is already laid out on mount
 
     return () => {
       disposed = true;
