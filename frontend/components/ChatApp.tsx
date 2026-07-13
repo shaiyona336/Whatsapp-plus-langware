@@ -62,7 +62,6 @@ export function ChatApp({ me, onLogout }: { me: string; onLogout: () => void }) 
     (async () => {
       const conv = await api.openConversation(me, other);
       if (cancelled) return;
-      console.log(`[conv] opened id=${conv.id} me=${me} other=${other}`);
       setConversation(conv);
       const [msgs, terms] = await Promise.all([
         api.getMessages(conv.id),
@@ -95,21 +94,10 @@ export function ChatApp({ me, onLogout }: { me: string; onLogout: () => void }) 
     let retry: ReturnType<typeof setTimeout> | null = null;
 
     function connect() {
-      console.log(`[ws] connect() opening socket for cid=${cid}`);
       const ws = connectWs(cid);
       wsRef.current = ws;
-      ws.onopen = () =>
-        console.log(`[ws] OPEN cid=${cid} readyState=${ws.readyState}`);
-      ws.onmessage = (ev) => {
-        const event = JSON.parse(ev.data) as WsEvent;
-        console.log(`[ws] message cid=${cid} type=${event.type}`);
-        handleEvent(event);
-      };
-      ws.onerror = () => console.log(`[ws] ERROR cid=${cid}`);
-      ws.onclose = (e) => {
-        console.log(
-          `[ws] CLOSE cid=${cid} code=${e.code} wasClean=${e.wasClean} intentional=${closed}`,
-        );
+      ws.onmessage = (ev) => handleEvent(JSON.parse(ev.data) as WsEvent);
+      ws.onclose = () => {
         if (closed) return; // we intentionally tore down; don't reconnect
         retry = setTimeout(reconnect, 1000);
       };
@@ -117,7 +105,6 @@ export function ChatApp({ me, onLogout }: { me: string; onLogout: () => void }) 
 
     async function reconnect() {
       if (closed) return;
-      console.log(`[ws] reconnect() cid=${cid}`);
       connect(); // start listening again before re-syncing
       try {
         const [msgs, terms] = await Promise.all([
@@ -142,7 +129,6 @@ export function ChatApp({ me, onLogout }: { me: string; onLogout: () => void }) 
     connect();
 
     return () => {
-      console.log(`[ws] teardown cid=${cid}`);
       closed = true;
       if (retry) clearTimeout(retry);
       wsRef.current?.close();

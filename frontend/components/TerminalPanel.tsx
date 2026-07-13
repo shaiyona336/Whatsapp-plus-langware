@@ -145,9 +145,7 @@ export function TerminalPanel({
     setRunning(true);
     setCommand("");
     try {
-      console.log(`[run] POST terminal=${terminal.id} sender=${me} cmd=${cmd}`);
-      const res = await api.runCommand(terminal.id, me, cmd);
-      console.log(`[run] server responded msg id=${res.id} kind=${res.kind}`);
+      await api.runCommand(terminal.id, me, cmd);
     } catch (err) {
       termRef.current?.writeln(
         `\x1b[31m# error: ${(err as Error).message}\x1b[0m`,
