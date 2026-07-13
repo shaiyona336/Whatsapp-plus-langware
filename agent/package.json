@@ -1,0 +1,10 @@
+{
+  "name": "flowpad-terminal-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "One-shot command agent: runs commands on the sharer's machine, in the folders they shared, on behalf of a logged-in user. Connects to the FastAPI relay over a WebSocket. No native dependencies.",
+  "main": "agent.js",
+  "scripts": {
+    "start": "node agent.js"
+  }
+}

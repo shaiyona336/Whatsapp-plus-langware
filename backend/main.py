@@ -4,8 +4,8 @@ Hero feature = shared terminals (command-runner). Chat is the thin frame.
 Single backend, demoed as two browser tabs. No sandbox (out of scope).
 """
 import os
+import uuid
 import asyncio
-import subprocess
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,7 +17,6 @@ import models
 import schemas
 
 SHARED_ROOT = os.environ.get("SHARED_ROOT", os.path.join(os.path.dirname(__file__), "workspace"))
-CMD_TIMEOUT = int(os.environ.get("CMD_TIMEOUT", "20"))
 
 app = FastAPI(title="WhatsApp-prototype")
 app.add_middleware(
@@ -65,6 +64,74 @@ async def ws_endpoint(ws: WebSocket, conversation_id: int):
             await ws.receive_text()   # clients push actions via REST; socket is notify-only
     except WebSocketDisconnect:
         hub.leave(conversation_id, ws)
+
+
+# --------------------------------------------------------------------------
+# Agent relay: per-user agents run commands on their own machines. A command
+# for a terminal is relayed to the agent of the terminal's owner (shared_by),
+# which runs it in the shared folder and returns the output. One agent per
+# person; each agent handles all of that person's shared folders.
+# --------------------------------------------------------------------------
+class AgentRegistry:
+    def __init__(self) -> None:
+        self.agents: dict[str, WebSocket] = {}          # username -> agent socket
+        self.pending: dict[str, asyncio.Future] = {}    # req_id -> awaiting result
+
+    def register(self, username: str, ws: WebSocket) -> None:
+        self.agents[username] = ws
+
+    def unregister(self, ws: WebSocket) -> None:
+        for user, sock in list(self.agents.items()):
+            if sock is ws:
+                del self.agents[user]
+
+    def resolve(self, req_id: str, output: str) -> None:
+        fut = self.pending.pop(req_id, None)
+        if fut and not fut.done():
+            fut.set_result(output)
+
+    async def run(self, owner: str, terminal_id: int, command: str, cwd: str,
+                  timeout: float = 30.0) -> str:
+        ws = self.agents.get(owner)
+        if ws is None:
+            return (f"(no agent connected for '{owner}' — start the agent on "
+                    f"their machine, logged in as '{owner}')")
+        req_id = uuid.uuid4().hex
+        fut: asyncio.Future = asyncio.get_event_loop().create_future()
+        self.pending[req_id] = fut
+        try:
+            await ws.send_json({
+                "type": "run", "req_id": req_id, "terminal_id": terminal_id,
+                "command": command, "cwd": cwd,
+            })
+        except Exception:
+            self.pending.pop(req_id, None)
+            return "(failed to reach the agent)"
+        try:
+            return await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            self.pending.pop(req_id, None)
+            return f"(no response from the agent after {timeout:.0f}s)"
+
+
+agents = AgentRegistry()
+
+
+@app.websocket("/agent/ws")
+async def agent_ws(ws: WebSocket):
+    await ws.accept()
+    try:
+        while True:
+            msg = await ws.receive_json()
+            kind = msg.get("type")
+            if kind == "agent_hello":
+                user = (msg.get("agent") or "").strip()
+                if user:
+                    agents.register(user, ws)
+            elif kind == "run_result":
+                agents.resolve(msg.get("req_id"), msg.get("output", ""))
+    except WebSocketDisconnect:
+        agents.unregister(ws)
 
 
 # --------------------------------------------------------------------------
@@ -163,9 +230,9 @@ async def send_message(payload: schemas.SendMessageIn, db: Session = Depends(get
 # --------------------------------------------------------------------------
 @app.post("/terminals/share", response_model=schemas.TerminalOut)
 async def share_terminal(payload: schemas.ShareTerminalIn, db: Session = Depends(get_db)):
-    folder = payload.root_folder.strip() or SHARED_ROOT
-    if not os.path.isdir(folder):
-        raise HTTPException(400, f"not a directory: {folder}")
+    # The folder lives on the sharer's machine (where their agent runs), not on
+    # the server — so we don't validate it here; a bad path just fails at run.
+    folder = payload.root_folder.strip()
     term = models.Terminal(
         conversation_id=payload.conversation_id, shared_by=payload.shared_by, root_folder=folder,
     )
@@ -192,8 +259,8 @@ async def run_command(payload: schemas.RunCommandIn, db: Session = Depends(get_d
     cmd_msg = _add_message(db, cid, payload.sender, "terminal_cmd", payload.command, term.id)
     await hub.broadcast(cid, _msg_event("terminal_cmd", cmd_msg))
 
-    # run fresh from the terminal's folder — one-shot, off the event loop
-    output = await asyncio.to_thread(_execute, payload.command, term.root_folder)
+    # relay to the owner's agent, which runs it on their machine and replies
+    output = await agents.run(term.shared_by, term.id, payload.command, term.root_folder)
 
     out_msg = _add_message(db, cid, payload.sender, "terminal_output", output, term.id)
     await hub.broadcast(cid, _msg_event("terminal_output", out_msg))
@@ -214,16 +281,3 @@ async def revoke_terminal(payload: schemas.RevokeTerminalIn, db: Session = Depen
         "payload": {"terminal_id": term.id},
     })
     return {"terminal_id": term.id, "status": "revoked"}
-
-
-def _execute(command: str, cwd: str) -> str:
-    """Run one command to completion. NO SANDBOX — prototype only."""
-    try:
-        proc = subprocess.run(
-            command, cwd=cwd, shell=True, capture_output=True, text=True, timeout=CMD_TIMEOUT,
-        )
-        return (proc.stdout or "") + (proc.stderr or "") or "(no output)"
-    except subprocess.TimeoutExpired:
-        return f"(timed out after {CMD_TIMEOUT}s)"
-    except Exception as e:
-        return f"(error: {e})"
