@@ -31,13 +31,22 @@ export function TerminalPanel({
 
   const [command, setCommand] = useState("");
   const [running, setRunning] = useState(false);
+  const [ready, setReady] = useState(false); // xterm is sized & safe to write to
 
   const active = terminal.status === "active";
   const isOwner = terminal.shared_by === me;
 
-  // Boot the xterm instance once.
+  // Boot the xterm instance once, but don't OPEN it (attach to the DOM), fit,
+  // or write to it until the host element actually has a nonzero size. Opening
+  // a 0-size terminal (which happens with the dynamic import + first paint, and
+  // StrictMode's mount/remount in dev) makes xterm schedule an internal
+  // syncScrollArea that reads undefined renderer dimensions and throws
+  // "Cannot read properties of undefined (reading 'dimensions')". A
+  // ResizeObserver drives the first open/fit and every later resize.
   useEffect(() => {
-    if (!hostRef.current) return;
+    const host = hostRef.current;
+    if (!host) return;
+
     const term = new XTerm({
       convertEol: true,
       cursorBlink: false,
@@ -52,39 +61,59 @@ export function TerminalPanel({
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
-    term.open(hostRef.current);
-    try {
-      fit.fit();
-    } catch {
-      /* container may be 0-size on first paint */
-    }
-    term.writeln(`\x1b[90m# shared by ${terminal.shared_by}`);
-    term.writeln(`# cwd: ${terminal.root_folder}\x1b[0m`);
 
     termRef.current = term;
     fitRef.current = fit;
     writtenRef.current = 0;
 
-    const onResize = () => {
+    let disposed = false;
+    let opened = false;
+
+    const safeFit = () => {
+      if (disposed || !opened || !host.offsetWidth || !host.offsetHeight) return;
       try {
         fit.fit();
       } catch {
         /* ignore */
       }
     };
-    window.addEventListener("resize", onResize);
+
+    // Attach to the DOM (term.open) only once the container has a real size,
+    // then fit + write the header. Deferring open is what actually prevents the
+    // "reading 'dimensions'" crash — it fires from inside term.open() itself.
+    const openWhenSized = () => {
+      if (opened || disposed || !host.offsetWidth || !host.offsetHeight) return;
+      opened = true;
+      term.open(host);
+      safeFit();
+      term.writeln(`\x1b[90m# shared by ${terminal.shared_by}`);
+      term.writeln(`# cwd: ${terminal.root_folder}\x1b[0m`);
+      setReady(true); // unblocks the transcript-paint effect below
+    };
+
+    const ro = new ResizeObserver(() => {
+      openWhenSized();
+      safeFit();
+    });
+    ro.observe(host);
+    openWhenSized(); // in case the host is already laid out on mount
+
     return () => {
-      window.removeEventListener("resize", onResize);
+      disposed = true;
+      ro.disconnect();
       term.dispose();
       termRef.current = null;
+      fitRef.current = null;
+      setReady(false);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [terminal.id]);
 
-  // Paint any transcript messages we haven't written yet.
+  // Paint any transcript messages we haven't written yet. Gated on `ready` so
+  // we never write before the terminal has been sized (see boot effect above).
   useEffect(() => {
     const term = termRef.current;
-    if (!term) return;
+    if (!term || !ready) return;
     for (let i = writtenRef.current; i < messages.length; i++) {
       const m = messages[i];
       if (m.kind === "terminal_cmd") {
@@ -95,14 +124,14 @@ export function TerminalPanel({
       }
     }
     writtenRef.current = messages.length;
-  }, [messages]);
+  }, [messages, ready]);
 
   // Note revocation in the transcript.
   useEffect(() => {
-    if (!active && termRef.current) {
+    if (!active && ready && termRef.current) {
       termRef.current.writeln("\x1b[31m# terminal revoked\x1b[0m");
     }
-  }, [active]);
+  }, [active, ready]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -111,7 +140,9 @@ export function TerminalPanel({
     setRunning(true);
     setCommand("");
     try {
-      await api.runCommand(terminal.id, me, cmd);
+      console.log(`[run] POST terminal=${terminal.id} sender=${me} cmd=${cmd}`);
+      const res = await api.runCommand(terminal.id, me, cmd);
+      console.log(`[run] server responded msg id=${res.id} kind=${res.kind}`);
     } catch (err) {
       termRef.current?.writeln(
         `\x1b[31m# error: ${(err as Error).message}\x1b[0m`,
