@@ -90,8 +90,13 @@ class AgentRegistry:
         if fut and not fut.done():
             fut.set_result(output)
 
+    # Timeout cascade: the agent kills a command at 30s and still REPLIES with
+    # a "(timed out ...)" message, so this wait must outlast 30s to relay it;
+    # the Next dev proxy in turn must outlast this (proxyTimeout in
+    # next.config.ts), or the client gets a bare 500 instead of the graceful
+    # message and the response never reaches the transcript.
     async def run(self, owner: str, terminal_id: int, command: str, cwd: str,
-                  timeout: float = 30.0) -> str:
+                  timeout: float = 35.0) -> str:
         ws = self.agents.get(owner)
         if ws is None:
             return (f"(no agent connected for '{owner}' — start the agent on "
@@ -106,6 +111,7 @@ class AgentRegistry:
             })
         except Exception:
             self.pending.pop(req_id, None)
+            self.unregister(ws)  # dead socket: drop it so the state self-heals
             return "(failed to reach the agent)"
         try:
             return await asyncio.wait_for(fut, timeout=timeout)
@@ -131,6 +137,11 @@ async def agent_ws(ws: WebSocket):
             elif kind == "run_result":
                 agents.resolve(msg.get("req_id"), msg.get("output", ""))
     except WebSocketDisconnect:
+        pass
+    finally:
+        # Unregister on ANY exit (abrupt resets can raise more than
+        # WebSocketDisconnect); a stale entry here means every later command
+        # for this user hangs until the relay times out.
         agents.unregister(ws)
 
 

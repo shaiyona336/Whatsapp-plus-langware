@@ -52,9 +52,11 @@ command to alice's agent.
 
 **Frontend → backend wiring** (`frontend/next.config.ts`): the browser calls
 relative `/api/*`; Next rewrites strip `/api` and proxy to `BACKEND_URL`
-(default `http://localhost:8080`). The **WebSocket is not proxied** (rewrites
+(default `http://127.0.0.1:8080` — a literal IP, because Node can resolve
+`localhost` to IPv6 `::1` while uvicorn listens on IPv4 only, which breaks
+the proxy with ECONNREFUSED). The **WebSocket is not proxied** (rewrites
 don't handle `ws://`), so it connects directly to `NEXT_PUBLIC_WS_URL`
-(default `ws://localhost:8080`). That single `localhost` default is the only
+(default `ws://localhost:8080`). That single localhost default is the only
 thing that makes this single-machine; point those two env vars + the agent's
 `AGENT_WS_URL` at a real host and it's multi-machine (see §8).
 
@@ -183,11 +185,15 @@ Open two browser tabs, log in as `alice` and `bob`, pick each other as a
 contact, share a folder as alice, and run commands. Alice's agent executes them.
 
 **Two machines (LAN):** no logic changes — just point everything at the server's
-real address instead of `localhost`:
+real address instead of `localhost`. `start-lan-server.ps1` (repo root)
+automates the server side: it detects the LAN IP and starts both servers with
+the right env. Manually, that means:
 - Backend on the "server" PC bound to `0.0.0.0`; note its LAN IP (e.g.
   `192.168.1.20`). Open firewall for `8080`/`3000`.
-- Frontend: `BACKEND_URL=http://192.168.1.20:8080` and
-  `NEXT_PUBLIC_WS_URL=ws://192.168.1.20:8080`, served with host `0.0.0.0`.
+- Frontend served with host `0.0.0.0` and `NEXT_PUBLIC_WS_URL=ws://192.168.1.20:8080`,
+  plus `ALLOWED_DEV_ORIGIN=192.168.1.20` — Next 16's dev server refuses
+  `/_next/*` requests from non-localhost origins (403) unless the origin is
+  allow-listed via `allowedDevOrigins` (wired to that env in `next.config.ts`).
 - Each agent: `AGENT_WS_URL=ws://192.168.1.20:8080/agent/ws node agent.js <name>`
   on **that person's own PC**.
 

@@ -13,11 +13,10 @@ dist/
 .env.local
 .env.*.local
 
+# local databases (recreated on backend startup)
+backend/*.db
+
 # tooling
 .cache/
 *.tsbuildinfo
 next-env.d.ts
-
-# supabase local state
-supabase/.temp/
-supabase/.branches/

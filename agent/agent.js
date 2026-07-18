@@ -12,7 +12,9 @@
 // command arrives with its own folder, so there is no per-terminal state.
 const { exec } = require("child_process");
 
-const SERVER_WS = process.env.AGENT_WS_URL || "ws://localhost:8080/agent/ws";
+// 127.0.0.1 (not "localhost"): Node can resolve localhost to IPv6 ::1, which
+// uvicorn isn't listening on — the agent would silently retry forever.
+const SERVER_WS = process.env.AGENT_WS_URL || "ws://127.0.0.1:8080/agent/ws";
 const USER = (process.argv[2] || process.env.AGENT_USER || "").trim();
 const CMD_TIMEOUT_MS = 30000;
 const MAX_OUTPUT = 10 * 1024 * 1024; // 10 MB
@@ -23,6 +25,23 @@ if (!USER) {
 }
 
 let ws = null;
+let reconnectTimer = null;
+
+// Node's built-in WebSocket (undici) doesn't always hold the event loop open
+// while a connection is in progress, so the process could exit code 0 mid-
+// handshake or between reconnect retries. A live interval pins the loop.
+setInterval(() => {}, 60_000);
+
+// A socket that dies after connecting fires 'close'; one whose CONNECTION
+// ATTEMPT is refused (server down) fires only 'error' — never 'close'. Both
+// paths must reschedule, and the guard dedupes when both fire for one socket.
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connect();
+  }, 1000);
+}
 
 function send(obj) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
@@ -74,11 +93,11 @@ function connect() {
 
   ws.addEventListener("close", () => {
     console.log("[agent] disconnected; retrying in 1s");
-    setTimeout(connect, 1000);
+    scheduleReconnect();
   });
 
   ws.addEventListener("error", () => {
-    /* a 'close' event always follows; reconnect handled there */
+    scheduleReconnect();
   });
 }
 
