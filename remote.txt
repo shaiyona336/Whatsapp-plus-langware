@@ -1,0 +1,189 @@
+================================================================================
+ REMOTE OVER THE INTERNET
+ Letting someone ANYWHERE (e.g. the interviewer's PC) run commands in a
+ terminal on MY machine - fastest possible path during an interview.
+================================================================================
+
+THE IDEA (say this out loud - it IS the interview answer)
+---------------------------------------------------------
+Nothing ever connects TO the executing machine - the agent dials OUT to the
+relay over a WebSocket, and commands come back down that same connection.
+That's the same trick as GitHub Actions runners and VS Code Remote tunnels.
+So a desktop behind a phone hotspot (carrier-grade NAT = inbound connections
+are impossible) can still serve its terminal to the whole internet. The ONLY
+thing that must be publicly reachable is the RELAY (backend + frontend).
+We make it public with two free Cloudflare quick tunnels. ZERO code changes -
+three environment variables.
+
+Why two tunnels: the browser talks REST through the Next proxy (port 3000),
+but its WebSocket connects DIRECTLY to the backend (port 8080) - rewrites
+don't carry the WS. So both ports need a public address.
+
+  interviewer's browser ──https──> tunnel B ──> localhost:3000 (frontend)
+  interviewer's browser ──wss───> tunnel A ──> localhost:8080 (backend WS)
+  my agent ─────────────wss───> tunnel A ──> localhost:8080 (or localhost
+                                              directly if same machine)
+
+
+================================================================================
+PART 0 - ONE-TIME PREP (already done / verify before interview day)
+================================================================================
+
+1. cloudflared must be installed (free, no account needed for quick tunnels):
+     winget install --id Cloudflare.cloudflared
+   Verify:  cloudflared --version
+   (Open a NEW terminal after install so PATH is fresh.)
+
+2. Rehearse Part 1 once at home. Best test: open the public URL on your
+   PHONE with Wi-Fi OFF (mobile data) - that is a true internet client.
+
+
+================================================================================
+PART 1 - THE FASTEST PATH (~5 minutes, everything on the machine in front of you)
+================================================================================
+
+ORDER MATTERS: mint the tunnel URLs (steps 2-3) BEFORE starting the frontend
+(step 4), because NEXT_PUBLIC_WS_URL is baked in when the dev server starts.
+
+1. Backend (terminal 1):
+     cd backend
+     .venv\Scripts\uvicorn main:app --port 8080 --no-use-colors
+
+2. Tunnel A -> backend (terminal 2):
+     cloudflared tunnel --url http://localhost:8080
+   Wait for the banner; COPY the printed URL, e.g.:
+     https://tall-otter-example.trycloudflare.com          <- call this A
+
+3. Tunnel B -> frontend (terminal 3):
+     cloudflared tunnel --url http://localhost:3000
+   Copy its URL too:
+     https://red-panda-example.trycloudflare.com           <- call this B
+
+4. Frontend, with ONE env var (terminal 4).
+
+   You only need NEXT_PUBLIC_WS_URL - the browser's WebSocket target. It is
+   tunnel A (the 8080 one) with the scheme changed from https:// to wss://.
+   (*.trycloudflare.com and *.ngrok-*.* are already allow-listed in
+   next.config.ts, so you do NOT set ALLOWED_DEV_ORIGIN for a tunnel - that
+   was only for the LAN/IP demo. One less thing to get wrong.)
+
+   Build the value - with A = https://tall-otter-example.trycloudflare.com:
+     NEXT_PUBLIC_WS_URL = A with "https://" REPLACED by "wss://"
+                        -> wss://tall-otter-example.trycloudflare.com
+                        (exactly ONE scheme - "wss://https://..." is WRONG)
+
+   In PowerShell (prompt starts with "PS"):
+     cd frontend
+     $env:NEXT_PUBLIC_WS_URL = 'wss://tall-otter-example.trycloudflare.com'
+     npx next dev -p 3000
+
+   In cmd (prompt is just "C:\...>"): $env: does NOT work there
+   ("The filename, directory name, or volume label syntax is incorrect"):
+     cd frontend
+     set NEXT_PUBLIC_WS_URL=wss://tall-otter-example.trycloudflare.com
+     npx next dev -p 3000
+
+5. Your agent (terminal 5) - username must match your web login:
+     cd agent
+     node agent.js shai
+   (Same machine as the backend, so the default localhost URL is fine.
+    If the executing machine is ELSEWHERE, see Part 2.)
+
+6. SELF-CHECK before handing anything over - in your own browser:
+     https://<A>/users          -> expect []  (backend reachable via tunnel)
+     https://<B>                -> the login page loads
+   Log in yourself, share a folder, run `dir` - works end to end?
+
+7. Hand the interviewer the B URL (say it, or chat it to them). They:
+     - open  https://<B>  in any browser, anywhere
+     - log in as any name (e.g. "interviewer")
+     - click your name -> your shared terminal panel appears
+     - type a command -> IT RUNS ON YOUR MACHINE, output on both screens.
+
+8. WHEN DONE: Ctrl+C both cloudflared windows. The URLs die with them.
+   (This is your security story - see Part 3.)
+
+
+================================================================================
+PART 2 - VARIANT: THE EXECUTOR IS MY DESKTOP AT HOME (on the hotspot)
+================================================================================
+
+Everything in Part 1 stays on the machine in front of you EXCEPT the agent,
+which runs on the home desktop pointed at tunnel A:
+
+     $env:AGENT_WS_URL = 'wss://<A-host>/agent/ws'
+     node agent.js shai
+
+The catch: quick-tunnel URLs are random PER RUN, and the home desktop is
+unattended - you can't reach in to start or repoint anything (CGNAT again,
+now working against you). Two ways around it:
+
+  a) START EVERYTHING AT HOME BEFORE LEAVING: run all of Part 1 on the
+     desktop, write down A and B, and hope nothing dies all day. Fragile.
+
+  b) STABLE ADDRESS (the robust prep): get a tunnel URL that never changes -
+     ngrok's free tier includes one static domain (needs an account +
+     authtoken), or a named Cloudflare tunnel (needs a Cloudflare account).
+     Then, before leaving home, start ONLY the agent on the desktop pointed
+     at that stable address. The agent retries every second forever (that
+     reconnect loop is battle-tested), so the moment you bring the tunnel up
+     from the interview machine, the home desktop connects by itself.
+     That is a genuinely impressive moment to demo.
+
+Honest recommendation for a live interview: do Part 1 on the machine in
+front of you and SAY "this laptop is now playing the role of my home
+desktop - the agent code and the CGNAT story are identical." Same proof,
+none of the unattended-machine risk.
+
+
+================================================================================
+PART 3 - WHAT TO SAY WHILE DOING IT
+================================================================================
+
+- Opening: "The agent dials out, so the executing machine needs no inbound
+  access - even behind carrier-grade NAT. I only need to make the relay
+  public. Watch: two tunnels, three env vars, no code changes."
+
+- While it runs: point out the tunnels are OUTBOUND from this machine on
+  port 443 - that's why the hotspot/office network doesn't matter.
+
+- The security beat (volunteer it BEFORE they ask): "I've just put an
+  unauthenticated remote-code-execution endpoint on the public internet.
+  For this demo it's an unguessable URL that dies when I close the tunnel -
+  and this is exactly why auth is the first roadmap item: user sessions,
+  a token or mTLS identity for agents instead of trusting agent_hello, and
+  per-terminal permissions."
+
+- Close: kill the tunnels on camera. "And now it's gone."
+
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+- Tunnel prints URL but https://<A>/users gives 502/530:
+    the LOCAL server behind it isn't up (start backend first), or you
+    tunneled the wrong port.
+- Login page loads but stuck after login / no live updates:
+    the WebSocket. Check NEXT_PUBLIC_WS_URL is wss:// (not ws://), is the
+    A tunnel (8080, NOT B), and that the frontend was started AFTER the
+    env var was set (it's baked at startup - restart the frontend if you
+    minted new tunnel URLs).
+- Login page is BLANK/white but the browser TAB TITLE is correct:
+    classic 403-on-/_next-assets - the HTML shell loaded but Next refused to
+    serve its JS to this origin, so nothing renders. With the baked-in
+    *.trycloudflare.com allow-list this should not happen through a tunnel;
+    if it does, you are opening the app from a NON-tunnel origin (e.g. a raw
+    IP), or the frontend is running old config - RESTART the frontend so it
+    reloads next.config.ts. (Confirm: view-source shows /_next/static/*.js
+    script tags but the browser Network tab shows them as 403.)
+- "(no agent connected for 'shai')":
+    agent not running, or logged-in name != agent name, or (Part 2) the
+    agent's AGENT_WS_URL doesn't point at the CURRENT A tunnel.
+- Command echoes but output slow/missing:
+    tunnels add a little latency; the timeout cascade (agent 30s < backend
+    35s < proxy 60s) still holds, so worst case is a graceful timeout
+    message, not a hang.
+- cloudflared won't connect at all:
+    the network blocks outbound 443 (rare, even on corp Wi-Fi). Fall back
+    to your phone's hotspot - cloudflared only ever dials out.

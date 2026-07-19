@@ -1,0 +1,172 @@
+================================================================================
+ HOW THE AGENT WORKS
+ (agent/agent.js - the piece that runs commands on the terminal owner's PC)
+================================================================================
+
+THE PROBLEM IT SOLVES
+---------------------
+A browser cannot run commands on anyone's computer - it is sandboxed, on
+purpose. And the backend server must NOT run them either: the commands belong
+to the person who shared the folder, so they must run on THAT person's
+machine, with that person's files. The agent is the missing piece: a tiny
+program each user runs on their own PC that executes commands on the
+backend's behalf, but only for terminals that user has shared.
+
+So the full chain is:
+
+  other user's browser --> backend (relay only) --> OWNER's agent --> output
+                                                     runs the command
+                                                     on the owner's PC
+
+The backend never executes anything. It just routes each command to the
+agent of the terminal's OWNER (the `shared_by` field of the terminal row)
+and waits for the reply. Who typed the command doesn't matter - what matters
+is whose terminal it is.
+
+
+WHAT THE AGENT IS
+-----------------
+One file: agent/agent.js. Plain Node.js, ZERO npm dependencies (it only uses
+Node built-ins: WebSocket and child_process). That is deliberate - you can
+copy this single file to any machine with Node 22+ and run it, no install.
+
+Start it with the username you use on the login screen:
+
+    cd agent
+    node agent.js alice
+
+The name MUST match the web login, because the backend routes commands by
+username. Wrong name = "(no agent connected for 'alice' ...)".
+
+By default it connects to ws://127.0.0.1:8080/agent/ws (the backend on the
+same machine). On another machine, point it at the server:
+
+    $env:AGENT_WS_URL='ws://<SERVER_IP>:8080/agent/ws'; node agent.js bob
+
+(127.0.0.1 and not "localhost" on purpose: Node can resolve localhost to
+IPv6 ::1, which uvicorn is not listening on - the connection would fail.)
+
+
+LIFE OF THE AGENT, STEP BY STEP
+-------------------------------
+1. CONNECT. It opens ONE WebSocket to the backend's /agent/ws endpoint.
+   One socket handles everything for this user - all their shared folders,
+   all their conversations. There is no per-terminal connection or state.
+
+2. INTRODUCE ITSELF. On open it sends:
+       { "type": "agent_hello", "agent": "alice" }
+   The backend's AgentRegistry stores:  agents["alice"] = this socket.
+   (Note for the security question: the backend TRUSTS this claim - anyone
+   could say hello as "alice". Known hole; fix = agent auth token/mTLS.)
+
+3. WAIT FOR WORK. When someone runs a command in one of alice's terminals,
+   the backend sends over that socket:
+       { "type": "run", "req_id": "<uuid>", "command": "dir",
+         "cwd": "C:\\the\\shared\\folder" }
+   - req_id: a unique id the backend generated for THIS command.
+   - cwd: the folder that was shared when the terminal was created
+     (terminals.root_folder in the DB). Blank folder = wherever the agent
+     itself was started.
+
+4. EXECUTE. The agent runs the command with child_process.exec:
+   - exec spawns the system shell (cmd.exe on Windows), so pipes,
+     redirects, and built-ins like `dir` or `echo` all work;
+   - cwd is set to the shared folder - the command starts there;
+   - windowsHide: no console window pops up on the owner's screen;
+   - 30-second timeout: a hung command is killed and the output gets
+     "(timed out after 30s)" appended;
+   - 10 MB max output (stdout+stderr merged); errors are folded into the
+     output text ("(error: ...)"), never thrown;
+   - it ALWAYS resolves with some text - "(no output)" if there was none.
+
+5. REPLY. It sends back:
+       { "type": "run_result", "req_id": "<same uuid>", "output": "..." }
+   Echoing req_id back is the crucial part - see "multiplexing" below.
+
+6. REPEAT. Steps 3-5 loop forever. Commands can even overlap: each run has
+   its own req_id, so replies can come back in any order.
+
+
+HOW ONE SOCKET HANDLES MANY COMMANDS (req_id multiplexing)
+----------------------------------------------------------
+On the backend (AgentRegistry.run in backend/main.py):
+
+  1. generate req_id = uuid4
+  2. pending[req_id] = a fresh asyncio.Future
+  3. send {"type":"run", "req_id", ...} down the owner's agent socket
+  4. await that Future with a 35s timeout
+
+When ANY run_result arrives on the agent socket, the backend pops
+pending[req_id] and resolves that Future with the output - which wakes up
+exactly the HTTP request that was waiting for this particular command.
+
+Edge cases (all graceful, worth saying in the interview):
+  - No agent registered for the owner  -> instant friendly message
+    "(no agent connected for 'alice' - start the agent ...)".
+  - Agent registered but silent        -> after 35s: "(no response from the
+    agent after 35s)". The 35 is deliberate: the agent's own kill timer is
+    30s and it still REPLIES after killing, so the backend must wait longer
+    than 30 to relay that reply (and the Next proxy waits 60s - each outer
+    layer outlasts the inner one, otherwise users see a bare 500).
+  - Reply arrives AFTER the timeout    -> resolve() finds no pending Future
+    for that req_id and simply drops it. Nothing crashes.
+  - Sending to a dead socket fails     -> caught, agent gets unregistered,
+    caller gets "(failed to reach the agent)".
+
+
+STAYING ALIVE AND RECONNECTING (two real bugs live here)
+--------------------------------------------------------
+The agent must survive backend restarts and network blips, and both fixes
+in this section came from real debugging sessions:
+
+  - setInterval(() => {}, 60_000) keep-alive: Node's built-in WebSocket
+    (undici) does not hold the event loop open while a connection attempt
+    is in progress, so without this the process could just exit (code 0,
+    no error) mid-handshake or between retries. The empty interval pins
+    the event loop forever.
+
+  - scheduleReconnect() from BOTH 'close' AND 'error': a socket that dies
+    after connecting fires 'close', but a connection attempt that is
+    REFUSED (backend down) fires ONLY 'error' - never 'close'. The old
+    code retried only from 'close', so the first failed retry while the
+    backend was down killed the retry chain silently: the process looked
+    healthy but would never reconnect. Now both events schedule a retry
+    (1s), deduplicated with a timer guard so error+close on the same
+    socket don't create two connections.
+
+On every successful (re)connect it sends agent_hello again, because the
+backend's registry is in-memory and empty after a restart. Net effect: you
+can kill and restart the backend freely; the agent re-registers within ~1s.
+
+The backend side self-heals too: the /agent/ws handler unregisters the
+socket in a `finally` (any kind of disconnect), and a failed send drops the
+dead socket - so a stale "registered but dead" agent can't wedge commands.
+
+
+WHAT THE AGENT DELIBERATELY DOES NOT DO
+---------------------------------------
+- No PTY / persistent shell. Every command is a fresh one-shot exec, so
+  `cd` and environment variables do NOT persist between commands, and
+  interactive programs (vim, python REPL) can't work. This is a scope
+  decision: no native dependencies, no per-terminal shell processes, no
+  streaming protocol - and the sharing architecture is still fully
+  demonstrated. Upgrade path: node-pty, one long-lived shell per terminal,
+  stream bytes instead of returning one blob.
+- No streaming. Output arrives as one blob when the command finishes.
+- No sandbox. The shared folder is only the STARTING directory, not a
+  jail - `cd ..`, absolute paths, and `type C:\anything` all escape it.
+  A real product needs an allow-list/container; say this before they ask.
+- No authentication. See the agent_hello note above.
+
+
+QUICK REFERENCE
+---------------
+  run:            node agent.js <username>       (from the agent/ folder)
+  remote server:  set AGENT_WS_URL=ws://<IP>:8080/agent/ws  (cmd)
+                  $env:AGENT_WS_URL='ws://<IP>:8080/agent/ws'  (PowerShell)
+  healthy start:  [agent] connected to ws://...:8080/agent/ws as "alice"
+  on each run:    [agent] run in C:\shared\folder: dir
+  timeouts:       agent kills at 30s < backend waits 35s < proxy waits 60s
+  limits:         10 MB output cap, stdout+stderr merged
+  gotcha:         clicking inside the agent's console window freezes it
+                  (Windows QuickEdit select mode) - press Esc to unfreeze.

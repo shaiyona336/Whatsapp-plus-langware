@@ -1,4 +1,4 @@
-# FlowPad — WhatsApp-style chat with shared terminals
+# TermChat — WhatsApp-style chat with shared terminals
 
 A small chat app whose **hero feature is sharing a terminal inside a
 conversation**: you share a folder, and either person in the chat can run
@@ -101,7 +101,10 @@ re-fetching messages.
    - Look up the owner's agent socket in `AgentRegistry`.
    - Create an `asyncio.Future`, key it by a fresh `req_id` (uuid).
    - Send `{type:"run", req_id, command, cwd}` to the agent.
-   - `await asyncio.wait_for(future, timeout=30)`.
+   - `await asyncio.wait_for(future, timeout=35)` — 35 on purpose: the agent
+     kills a command at 30s and still *replies* with a timeout message, so the
+     relay must wait longer than 30 to deliver it (and the Next dev proxy waits
+     60s — each outer layer outlasts the inner one).
 3. The agent runs `exec(command, {cwd})` locally, replies
    `{type:"run_result", req_id, output}`.
 4. The relay's `/agent/ws` loop calls `resolve(req_id, output)`, which sets the
@@ -111,7 +114,7 @@ re-fetching messages.
 
 **Correlation:** one socket per agent is *multiplexed* — many commands in
 flight are matched to their replies by `req_id → Future`. If the agent replies
-after the 30s timeout, `resolve()` finds no pending Future and safely drops it.
+after the 35s timeout, `resolve()` finds no pending Future and safely drops it.
 
 ---
 
@@ -144,7 +147,9 @@ down. (This is exactly the "bug 2" scenario — see Q&A — and it recovers.)
 - On `{type:"run"}`: `exec(command, {cwd: cwd || process.cwd(), timeout:30s,
   maxBuffer:10MB, windowsHide:true})`, concatenates stdout+stderr, replies
   `{type:"run_result", req_id, output}`.
-- Auto-reconnects 1s after any close.
+- Auto-reconnects 1s after any drop — scheduled from **both** the `close` and
+  `error` events (a refused connection fires only `error`, never `close`), so
+  the retry chain survives a backend that stays down for a while.
 - **Stateless per command** → **one agent per person serves all their shared
   folders**, because each request carries its own `cwd`. (Verified: alice shares
   3 folders, one agent, each command lands in the right folder.)
@@ -286,11 +291,13 @@ Each `run()` mints a `req_id` (uuid) and stores an `asyncio.Future` in
 `run_result`; `resolve(req_id, output)` sets that Future. Classic
 request/response multiplexing over one connection.
 
-**Q: What if the agent replies after the 30s timeout?**
+**Q: What if the agent replies after the 35s timeout?**
 `wait_for` already popped the Future and returned a timeout message. The late
 `resolve()` finds no pending entry and no-ops — the stray output is dropped
-safely. There are two timeout layers: the server's `wait_for(30)` and the
-agent's own `exec` timeout that kills the child.
+safely. There are three timeout layers, deliberately ordered: the agent's
+`exec` kill (30s, it still replies) < the server's `wait_for(35)` < the Next
+dev proxy (60s via `proxyTimeout`) — each outer layer outlasts the inner one
+so slow/hung commands surface as graceful messages, never bare 500s.
 
 **Q: What if no agent is connected for that owner?**
 `agents.run` returns "(no agent connected for 'alice' …)" as the output — the

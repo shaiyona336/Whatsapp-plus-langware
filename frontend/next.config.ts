@@ -12,12 +12,23 @@ const nextConfig: NextConfig = {
   // Pin the project root: a stray package-lock.json in the user profile dir
   // otherwise makes Turbopack guess the wrong workspace root and warn.
   turbopack: { root: __dirname },
-  // Next 16 rejects dev-server requests for /_next/* from non-localhost
-  // origins (403) unless the origin is allow-listed. Set ALLOWED_DEV_ORIGIN
-  // to this machine's LAN IP so another PC can open the app in dev mode.
-  allowedDevOrigins: process.env.ALLOWED_DEV_ORIGIN
-    ? [process.env.ALLOWED_DEV_ORIGIN]
-    : [],
+  // Next 16 returns 403 for /_next/* (its JS chunks) when the page was opened
+  // from a non-localhost origin, which renders as a BLANK WHITE PAGE (the HTML
+  // shell loads, so the <title> shows, but no JS runs). Allow-list the origins
+  // that need dev assets:
+  //   - the tunnel wildcards: any per-run cloudflared/ngrok URL works for the
+  //     remote-over-internet demo (remote.txt) with NO env var to set;
+  //   - ALLOWED_DEV_ORIGIN: this machine's LAN IP for the two-PC demo
+  //     (two_pcs.txt) — an IP isn't a tunnel host, so it still needs the env.
+  // Wildcards match one subdomain label only; bare trycloudflare.com and
+  // unrelated hosts are still rejected (verified against Next's matcher).
+  allowedDevOrigins: [
+    "*.trycloudflare.com",
+    "*.ngrok-free.app",
+    "*.ngrok.app",
+    "*.ngrok.io",
+    ...(process.env.ALLOWED_DEV_ORIGIN ? [process.env.ALLOWED_DEV_ORIGIN] : []),
+  ],
   // The rewrite proxy aborts upstream requests after 30s by default and
   // returns a bare 500 "Internal Server Error". /terminals/run can wait up to
   // 35s for an agent (see AgentRegistry.run), so the proxy must outlast it or
