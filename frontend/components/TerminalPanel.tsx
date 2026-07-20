@@ -168,30 +168,37 @@ export function TerminalPanel({
 
   return (
     <div className="overflow-hidden rounded-lg border border-border bg-[#0b141a] shadow-sm">
-      <div className="flex items-center justify-between gap-2 border-b border-white/10 px-3 py-1.5">
-        <div className="flex min-w-0 items-center gap-2">
-          <span
-            className={`h-2 w-2 shrink-0 rounded-full ${
-              active ? "bg-emerald-500" : "bg-red-500"
-            }`}
-          />
-          <span className="truncate font-mono text-xs text-[#d1d7db]">
-            {terminal.root_folder}
-          </span>
-          <span className="shrink-0 rounded bg-white/10 px-1.5 py-0.5 text-[10px] text-[#8696a0]">
-            #{terminal.id} · {terminal.shared_by}
-          </span>
+      <div className="border-b border-white/10 px-3 py-1.5">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <span
+              className={`h-2 w-2 shrink-0 rounded-full ${
+                active ? "bg-emerald-500" : "bg-red-500"
+              }`}
+            />
+            <span className="shrink-0 rounded bg-white/10 px-1.5 py-0.5 text-[10px] text-[#8696a0]">
+              #{terminal.id} · {terminal.shared_by}
+            </span>
+          </div>
+          {isOwner && active && (
+            <Button
+              size="sm"
+              variant="destructive"
+              className="h-6 px-2 text-xs"
+              onClick={revoke}
+            >
+              Revoke
+            </Button>
+          )}
         </div>
-        {isOwner && active && (
-          <Button
-            size="sm"
-            variant="destructive"
-            className="h-6 px-2 text-xs"
-            onClick={revoke}
-          >
-            Revoke
-          </Button>
-        )}
+        {/* Full shared-folder path on its own line so it's never cut off:
+            break-all wraps long Windows paths; title adds a hover tooltip. */}
+        <div
+          className="mt-1 break-all font-mono text-xs text-[#d1d7db]"
+          title={terminal.root_folder}
+        >
+          {terminal.root_folder}
+        </div>
       </div>
 
       <div ref={hostRef} className="h-56 w-full px-2 py-1" />
