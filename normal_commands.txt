@@ -1,0 +1,130 @@
+================================================================================
+ NORMAL COMMANDS - running TermChat on ONE PC (localhost)
+================================================================================
+This is the simple, everyday way to run it: everything on your machine, two
+browser tabs. No LAN, no tunnels, no firewall, no env vars. (For the two-PC
+demo see two_pcs.txt; for internet/remote see remote.txt.)
+
+Project folder:
+  C:\Users\shai\Desktop\projects\Whatsapp-plus-langware
+
+You need THREE terminals open (one per component). Leave all three running.
+
+
+================================================================================
+FIRST TIME ONLY (skip if you've already done it once)
+================================================================================
+  python -m venv backend\.venv
+  backend\.venv\Scripts\pip install -r backend\requirements.txt
+  cd frontend
+  npm install
+  cd ..
+
+
+================================================================================
+EVERY TIME - start the three components
+================================================================================
+
+--- Terminal 1: BACKEND (port 8080) ---
+  cd C:\Users\shai\Desktop\projects\Whatsapp-plus-langware\backend
+  .venv\Scripts\uvicorn main:app --reload --port 8080
+
+  Wait for:  "Uvicorn running on http://127.0.0.1:8080"
+
+--- Terminal 2: FRONTEND (port 3000) ---
+  cd C:\Users\shai\Desktop\projects\Whatsapp-plus-langware\frontend
+  npm run dev
+
+  Wait for:  "Ready in ..."
+
+--- Terminal 3: AGENT (the command runner) ---
+  cd C:\Users\shai\Desktop\projects\Whatsapp-plus-langware\agent
+  node agent.js alice
+
+  Expect:  [agent] connected to ws://127.0.0.1:8080/agent/ws as "alice"
+
+  The name (alice) MUST match the name you log in with in the browser.
+  Run ONE agent per person who will SHARE a terminal. For a full solo demo
+  where EITHER tab can share, open a 4th terminal and also run:
+      node agent.js bob
+
+
+================================================================================
+OPEN IT
+================================================================================
+1. Browser tab 1:  http://localhost:3000   -> log in as  alice
+2. Browser tab 2:  http://localhost:3000   -> log in as  bob
+   (a second normal tab is fine; or an incognito window)
+3. Pick the other person from Contacts to open the chat.
+4. Share a folder as alice (e.g. a real path on this PC like
+   C:\Users\shai\Desktop\projects\Whatsapp-plus-langware\test_commands).
+5. In either tab, type a command in that terminal -> it runs on THIS PC
+   (alice's agent) and the output shows in both tabs.
+
+Note: whoever SHARES the terminal is who runs it. If alice shared it, alice's
+agent must be running (Terminal 3). If you want bob to share too, bob's agent
+must be running as well.
+
+
+================================================================================
+STOP EVERYTHING
+================================================================================
+Press Ctrl+C in each of the three terminals. That's it - nothing stays
+running in the background.
+
+
+================================================================================
+CHECK IT STILL WORKS (after you change code)
+================================================================================
+  Backend end-to-end test:
+    cd C:\Users\shai\Desktop\projects\Whatsapp-plus-langware\backend
+    .venv\Scripts\python smoke.py
+    (expect: "SMOKE PASSED - hero path works end-to-end")
+
+  Frontend typecheck:
+    cd C:\Users\shai\Desktop\projects\Whatsapp-plus-langware\frontend
+    npx tsc --noEmit
+    (no output = clean)
+
+
+================================================================================
+QUICK FIXES
+================================================================================
+- "(no agent connected for 'alice')" when running a command:
+    Terminal 3 isn't running, or the agent name != the login name.
+    Start it with the matching name.
+
+- Command echoes but no output / everything hangs ~35s:
+    The agent froze. On Windows the #1 cause is clicking INSIDE the agent
+    window (that starts "Select" mode and pauses the program). Click the
+    window and press Esc, or just restart it.
+
+- Messages/output don't appear live (only after a manual refresh):
+    The browser's live socket didn't connect. Restart the frontend with an
+    explicit WS address:
+      In PowerShell:  $env:NEXT_PUBLIC_WS_URL='ws://127.0.0.1:8080'; npm run dev
+      In cmd:         set NEXT_PUBLIC_WS_URL=ws://127.0.0.1:8080 && npm run dev
+
+- "EADDRINUSE" / port 3000 or 8080 already in use:
+    A leftover process holds the port. In PowerShell:
+      Get-NetTCPConnection -LocalPort 3000 -State Listen
+      Stop-Process -Id <the OwningProcess number> -Force
+    (use 8080 for the backend port).
+
+- Frontend shows "Manifest file is empty" / blank page / weird build errors:
+    The .next cache is corrupted. Stop the frontend, then:
+      Remove-Item -Recurse -Force C:\Users\shai\Desktop\projects\Whatsapp-plus-langware\frontend\.next
+    Start it again (first start is slower - it rebuilds).
+
+- "no such column" or DB errors after you ADD a field to a model:
+    SQLite has no migrations here. Stop the backend, delete the DB, restart:
+      Remove-Item C:\Users\shai\Desktop\projects\Whatsapp-plus-langware\backend\app.db
+    (demo data is throwaway; it's recreated empty on startup.)
+
+
+================================================================================
+ONE-LINE REMINDER (the three commands, once set up)
+================================================================================
+  backend :  cd backend  ; .venv\Scripts\uvicorn main:app --reload --port 8080
+  frontend:  cd frontend ; npm run dev
+  agent   :  cd agent    ; node agent.js alice
